@@ -3,8 +3,9 @@ title: "Project"
 author: "Kevin Choi"
 date: '2022-11-13'
 output:
-  pdf_document: default
+  word_document: default
   html_document: default
+  pdf_document: default
 ---
 
 ```{r setup, include=FALSE}
@@ -20,6 +21,7 @@ library(psych)
 library(ipumsr)
 library(dplyr)
 library(modelsummary)
+library(apaTables)
 
 ```
 
@@ -141,6 +143,19 @@ data_short <- data_short %>%
 
 ```
 
+``` {r centering}
+data_short <- data_short %>%
+  group_by(CASEID) %>%
+  mutate (DURATION_CM = mean(DURATION),
+          DURATION_CMC = DURATION - DURATION_CM) %>%
+  ungroup()
+
+data_short %>%
+  select(CASEID, DURATION, DURATION_CM, DURATION_CMC)
+
+
+```
+
 ## Variable Description
 
 - CASEID: unique identifying number for participant
@@ -166,14 +181,14 @@ respondent (1 - Not At all, 7 - Very)
 
 Lv-1:
 
-$$\text{SCHAPPY}_{ij} = \beta_{0j} + \beta_{1j} \text{DURATION}_{ij} + e_{ij}$$
+$$\text{SCHAPPY}_{ij} = \beta_{0j} + \beta_{1j} \text{DURATION_CMC}_{ij} + e_{ij}$$
 
 Lv-2:
 
 $$
 \begin{aligned}
-  \beta_{0j} & = \gamma_{00} + \gamma_{01} \text{PAIDHOUR}_j + \gamma_{02} \text{log(INCOME)}_j + u_{0j}  \\
-  \beta_{1j} & = \gamma_{10} + u_{1j}
+  \beta_{0j} & = \gamma_{00} + \gamma_{01} \text{DURATION_CM}_j + \gamma_{02} \text{PAIDHOUR}_j + X_{3j} \gamma_{03} + ... + X_{8j} \gamma_{08} + u_{0j}  \\
+  \beta_{1j} & = \gamma_{10} + \gamma_{11}\text{PAIDHOUR}_j  + u_{1j}
 \end{aligned}
 $$
 
@@ -181,6 +196,11 @@ $$
 
 ```{r des_stats}
 summary(data_short)
+
+data_short_d <- data_short %>%
+  subset(select = -c(CASEID, FULLPART, WB_RESP, Leisure_All, ACTLINE, ACTIVITY, EARNWEEK, SCSTRESS, MEANING, DURATION_CM, DURATION_CMC))
+
+apa.cor.table(data_short_d, filename="cortable2.doc", table.number=1)
 
 data_short %>%
     select(PAIDHOUR, EARNWEEK, UHRSWORKT, DURATION) %>%
@@ -200,29 +220,79 @@ performance::icc(m0_hap)
 
 
 ```
+Yes, there is evidence that happiness derived from leisure varies across individuals, which accounts for 
+##Propensity Score Analysis
+```{r propensity-estimation}
+data_short$PAIDHOUR <- as.numeric(data_short$PAIDHOUR)
+data_ps <- data_short %>%
+  mutate(PAIDHOUR=recode(PAIDHOUR, 
+                    '1' = 0,
+                    '2' = 1))
+
+m_ps <- glmer(PAIDHOUR ~ SEX + AGE + MARST + DAY + UHRSWORKT + HH_NUMOWNKIDS + DURATION +
+                (1 | CASEID), family = "binomial",
+              glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000)),
+              data = data_ps)
+ps_mlm <- predict(m_ps, re.form = NULL, type = "response")
+
+#Plot the propensity scores across the two conditions of `PAIDHOUR`
+plot(factor(data_ps$PAIDHOUR), ps_mlm)
+
+#Stratification
+ps_strata <- ntile(ps_mlm, 5)
+mean(data_ps$SCHAPPY[data_ps$PAIDHOUR == 1 & ps_strata == 3])
+mean(data_ps$SCHAPPY[data_ps$PAIDHOUR == 0 & ps_strata == 3])
+```
 
 ## Multilevel Analysis 
 ```{r analysis}
+#random intercept
+m0 <- lmer(SCHAPPY ~ PAIDHOUR + (1|CASEID), data = data_short)
+summary(m0)
 
-m1 <- lmer(SCHAPPY ~ PAIDHOUR * DURATION * log(EARNWEEK) + (1 | CASEID),
-           data = data_short)
-summary(m1)
+m02 <- lmer(SCHAPPY ~ DURATION + (1|CASEID), data = data_short)
+summary (m02)
 
-#Covariate
-m1_c <- lmer(SCHAPPY ~ DURATION * PAIDHOUR * log(EARNWEEK) + AGE + MARST + DAY + UHRSWORKT + HH_NUMOWNKIDS +(1 | CASEID),
+sjPlot::plot_model(m02,
+                   type = "pred", terms = "DURATION",
+                   show.data = TRUE, title = "",
+                   dot.size = 0.5
+                   )
+
+#covariate
+m_c <- lmer(SCHAPPY ~ PAIDHOUR + SEX + AGE + MARST + DAY + UHRSWORKT + HH_NUMOWNKIDS + (1 | CASEID),
            data = data_short)
-summary(m1_c)
+summary(m_c)
+
+#cross level
+data_short %>%
+  filter (CASEID %in% sample(unique(CASEID), 16)) %>%
+  ggplot (aes (x = DURATION, y = SCHAPPY)) + 
+  geom_point (size=0.5) +
+  geom_smooth (method = "lm") + 
+  facet_wrap(~CASEID)
+
+m_cl <- lmer (SCHAPPY ~ PAIDHOUR * DURATION_CMC + DURATION_CM + (DURATION_CMC | CASEID), data = data_short)
+ranova(m_cl)
+summary(m_cl)
+
+m_cl_c <- lmer(SCHAPPY ~ PAIDHOUR * DURATION_CMC  + DURATION_CM + SEX + AGE + MARST + DAY + UHRSWORKT + HH_NUMOWNKIDS + (DURATION_CMC | CASEID),
+           data = data_short)
+summary(m_cl_c)
+
+
 
 msummary(list(
-    "M1" = m1,
-    "M1-Covarites" = m1_c
+    "Model 1" = m0,
+    "Model 2" = m_cl,
+    "Model 3" = m_cl_c
 ))
 
 ```
 
 ## Results
 ```{r data-summary}
-msummary(m1,
+msummary(m_cl_c,
          estimate = c("{estimate} [{conf.low}, {conf.high}]"),
          statistic = NULL,  # suppress the extra rows for SEs
          shape = effect + term ~ model,
@@ -230,6 +300,34 @@ msummary(m1,
 
 ```
 
+
+```{r visualization}
+
+m_cl_c %>%
+  augment(data=data_short) %>%
+  ggplot(aes (
+    x = DURATION, y = .fitted, group=factor(CASEID),
+    color = factor(PAIDHOUR)
+  ))+
+  geom_smooth(method="lm", se=FALSE, size=0.5) +
+  labs (y = "Happiness from Leisure", color = "PAIDHOUR")
+
+# sjPlot::plot_model(mb,
+#                    type = "pred", terms = "PAIDHOUR",
+#                    show.data = TRUE, title = "",
+#                    dot.size = 0.5
+#                    )
+# +
+#   stat_summary(
+#     data = data_short, aes (x = PAIDHOUR, y = SCHAPPY),
+#     fun = mean, geom = "point",
+#     col = "red",
+#     shape = 17,
+#     size = 3,
+#     alpha = 0.7
+#   )
+
+```
 
 If hourly workers have a greater propensity to make economic evaluation of time, they should display greater sensitivity to the opportunity cost of time and as a consequence, derive less happiness from leisurely activities. To explore people's subjective experience of leisurely activities, I used the happiness measure from the ATUS well-being module. To worker's hourly work status was dummy coded "1" for non-hourly workers and "2" for hourly workers. To account for the worker's opportunity cost of time, we used the duration spent on leisurely activities and their income as an indicator of the foregone earning from spending (wasting) time on leisure. To control for potential differences between hourly and non hourly workers, we controlled for various variables: age, marital status, number of hours worked, number of children under 18 and the day of diary. To test the hypothesis that happiness derived from engaging in leisurely activities is influenced by both hourly payment status and the opportunity cost of time, I fitted a multilevel model with hourly status, duration, and logged income on happiness to explore the three-way interaction among the three variables. 
 
